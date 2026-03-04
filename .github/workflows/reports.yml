@@ -1,0 +1,84 @@
+name: Demo Reports
+
+on:
+  schedule:
+    # Weekly — every Monday 03:30 UTC = 09:00 AM IST
+    - cron: '30 3 * * 1'
+    # Monthly — 1st of every month 17:00 UTC = 09:00 AM PST (10:00 AM PDT in summer)
+    - cron: '0 17 1 * *'
+
+  # Allow manual trigger from GitHub Actions UI for testing
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Report mode'
+        required: true
+        default: 'weekly'
+        type: choice
+        options:
+          - weekly
+          - monthly
+      dry_run:
+        description: 'Dry run (print only, do not post to Slack)'
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  weekly-report:
+    # Runs on Monday cron OR manual trigger with mode=weekly
+    if: >
+      (github.event_name == 'schedule' && github.event.schedule == '30 3 * * 1') ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.mode == 'weekly')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run weekly report
+        env:
+          HUBSPOT_TOKEN:     ${{ secrets.HUBSPOT_TOKEN }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          INSTANTLY_API_KEY: ${{ secrets.INSTANTLY_API_KEY }}
+        run: |
+          DRY_RUN=""
+          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
+            DRY_RUN="--dry-run"
+          fi
+          python report.py weekly $DRY_RUN
+
+  monthly-report:
+    # Runs on 1st-of-month cron OR manual trigger with mode=monthly
+    if: >
+      (github.event_name == 'schedule' && github.event.schedule == '0 17 1 * *') ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.mode == 'monthly')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run monthly report
+        env:
+          HUBSPOT_TOKEN:     ${{ secrets.HUBSPOT_TOKEN }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          INSTANTLY_API_KEY: ${{ secrets.INSTANTLY_API_KEY }}
+        run: |
+          DRY_RUN=""
+          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
+            DRY_RUN="--dry-run"
+          fi
+          python report.py monthly $DRY_RUN
