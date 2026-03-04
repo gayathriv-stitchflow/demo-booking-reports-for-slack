@@ -156,6 +156,33 @@ def instantly_campaign_name(campaign_id):
     return _campaign_name_cache[campaign_id]
 
 
+def fetch_active_instantly_campaigns():
+    """
+    Returns list of names of currently Active campaigns (status=1) in Instantly.
+    """
+    if not INSTANTLY_KEY:
+        return []
+    names = []
+    try:
+        starting_after = None
+        while True:
+            params = {"limit": 100}
+            if starting_after:
+                params["starting_after"] = starting_after
+            r = requests.get(f"{INSTANTLY_BASE}/campaigns", headers=INST_H, params=params)
+            r.raise_for_status()
+            data = r.json()
+            for c in data.get("items", []):
+                if c.get("status") == 1:
+                    names.append(c["name"])
+            if not data.get("next_starting_after"):
+                break
+            starting_after = data["next_starting_after"]
+    except Exception:
+        pass
+    return names
+
+
 def preload_instantly_campaigns(contact_email_map):
     """
     For outbound contacts, fetch their most recently active Instantly campaign.
@@ -407,6 +434,9 @@ def fetch_demos(start_ms, end_ms):
         print(f"  Fetching Instantly campaigns for {len(outbound_email_map)} outbound contacts ...")
         instantly_map = preload_instantly_campaigns(outbound_email_map)
 
+    print(f"  Fetching active Instantly campaigns ...")
+    active_campaigns = fetch_active_instantly_campaigns()
+
     # ── Build rows ────────────────────────────────────────────────────────
     rows = []
     for m in meetings:
@@ -445,7 +475,7 @@ def fetch_demos(start_ms, end_ms):
             seen[key] = r
     rows = list(seen.values())
 
-    return sorted(rows, key=lambda r: r["booked_ts"])
+    return sorted(rows, key=lambda r: r["booked_ts"]), active_campaigns
 
 # ── Slack message formatting ───────────────────────────────────────────────
 
@@ -470,15 +500,28 @@ def row_block(r):
     return f"{line1}\n{line2}"
 
 
-def campaign_breakdown(outbound_rows):
-    """Per-campaign summary lines for outbound rows, sorted by most bookings."""
+def campaign_breakdown(outbound_rows, active_campaigns=None):
+    """
+    Per-campaign summary lines.
+    Shows campaigns that produced demos first, then active campaigns with 0 demos.
+    active_campaigns: list of campaign names currently Active in Instantly.
+    """
     buckets = defaultdict(list)
     for r in outbound_rows:
         buckets[r["source_detail"]].append(r)
+
     lines = []
+    # Campaigns that produced demos this period
     for name, cr in sorted(buckets.items(), key=lambda x: -len(x[1])):
         cs = sum(1 for r in cr if r["outcome"] == "showed")
         lines.append(f"   📣 *{name}*   {len(cr)} booked  ·  {cs} showed")
+
+    # Active campaigns with 0 demos this period
+    if active_campaigns:
+        for name in active_campaigns:
+            if name not in buckets:
+                lines.append(f"   📣 *{name}*   0 bookings this period")
+
     return lines
 
 
@@ -512,7 +555,7 @@ def active_pipeline(rows):
     return sum(1 for r in rows if r["deal_stage"] not in TERMINAL)
 
 
-def slack_weekly(rows, label):
+def slack_weekly(rows, label, active_campaigns=None):
     showed    = sum(1 for r in rows if r["outcome"] == "showed")
     noshow    = sum(1 for r in rows if r["outcome"] == "noshow")
     cancelled = sum(1 for r in rows if r["outcome"] == "cancelled")
@@ -546,11 +589,11 @@ def slack_weekly(rows, label):
     if inbound_rows and outbound_rows:
         lines += [""]
     lines += channel_section(outbound_rows, "🟠", "Outbound",
-                             campaign_lines=campaign_breakdown(outbound_rows))
+                             campaign_lines=campaign_breakdown(outbound_rows, active_campaigns))
     return "\n".join(lines)
 
 
-def slack_monthly(rows, label):
+def slack_monthly(rows, label, active_campaigns=None):
     showed    = sum(1 for r in rows if r["outcome"] == "showed")
     noshow    = sum(1 for r in rows if r["outcome"] == "noshow")
     cancelled = sum(1 for r in rows if r["outcome"] == "cancelled")
@@ -622,7 +665,7 @@ def slack_monthly(rows, label):
             lines.append(s)
             if ch == "Outbound":
                 cr = [r for r in rows if r["channel"] == "Outbound"]
-                lines.extend(campaign_breakdown(cr))
+                lines.extend(campaign_breakdown(cr, active_campaigns))
 
     lines += ["", "─" * 38, "", "*Week by week:*"]
     for mon_dt in sorted(week_buckets):
@@ -675,8 +718,8 @@ def run_weekly(dry_run=False):
     label     = f"Week of {last_mon.strftime('%b %-d')} – {last_sun.strftime('%b %-d, %Y')}"
 
     print(f"\nWeekly report: {label}")
-    rows = fetch_demos(int(last_mon.timestamp() * 1000), int(last_sun.timestamp() * 1000))
-    post_slack(slack_weekly(rows, label), dry_run)
+    rows, active_campaigns = fetch_demos(int(last_mon.timestamp() * 1000), int(last_sun.timestamp() * 1000))
+    post_slack(slack_weekly(rows, label, active_campaigns), dry_run)
 
 
 def run_monthly(dry_run=False):
@@ -687,8 +730,8 @@ def run_monthly(dry_run=False):
     label      = first_prev.strftime("%B %Y")
 
     print(f"\nMonthly report: {label}")
-    rows = fetch_demos(int(first_prev.timestamp() * 1000), int(last_prev.timestamp() * 1000))
-    post_slack(slack_monthly(rows, label), dry_run)
+    rows, active_campaigns = fetch_demos(int(first_prev.timestamp() * 1000), int(last_prev.timestamp() * 1000))
+    post_slack(slack_monthly(rows, label, active_campaigns), dry_run)
 
 
 if __name__ == "__main__":
