@@ -31,6 +31,7 @@ CONTACT_PROPS = [
 MEETING_PROPS = [
     "hs_meeting_title", "hs_meeting_start_time",
     "hs_meeting_source", "hs_meeting_body", "hs_createdate",
+    "hs_meeting_created_from_link_id",
 ]
 
 FIREFLIES_RE = re.compile(r'https://app\.fireflies\.ai/view/[^\s"<>]+')
@@ -119,6 +120,25 @@ def hs_batch_assoc(from_type, from_ids, to_type):
             to_ids = [str(r["toObjectId"]) for r in item.get("to", [])]
             result[fid].extend(to_ids)
     return result
+
+# ── Meeting link map ───────────────────────────────────────────────────────
+
+def fetch_meeting_link_map():
+    """
+    Returns {link_id -> 'Inbound'|'Outbound'} by reading all HubSpot booking pages.
+    Links whose name contains 'outbound' → Outbound; everything else → Inbound.
+    """
+    link_map = {}
+    try:
+        data = hs_get("/scheduler/v3/meetings/meeting-links")
+        for link in data.get("results", []):
+            lid  = str(link.get("id", ""))
+            name = (link.get("name") or link.get("slug") or "").lower()
+            link_map[lid] = "Outbound" if "outbound" in name else "Inbound"
+    except Exception:
+        pass
+    return link_map
+
 
 # ── Instantly API helpers ──────────────────────────────────────────────────
 
@@ -299,10 +319,19 @@ SRC_LABELS = {
     "OFFLINE":          "Offline",
 }
 
-def classify_source(props, instantly_campaign=None):
+def classify_source(props, link_channel=None, instantly_campaign=None):
+    # 1. Calendar link is the most direct signal
+    if link_channel == "Outbound":
+        name = (instantly_campaign
+                or (props.get("instantly_campaign_name__all_") or "").split(";")[-1].strip()
+                or "Outbound")
+        return "Outbound", name
+    if link_channel == "Inbound":
+        src = props.get("hs_analytics_source") or ""
+        return "Inbound", SRC_LABELS.get(src, src or "Unknown")
+    # 2. Fall back to Instantly / HubSpot property (link ID unknown)
     campaign = (props.get("instantly_campaign_name__all_") or "").strip()
     if campaign:
-        # Prefer Instantly API result (accurate latest); fall back to HubSpot property
         name = instantly_campaign or campaign.split(";")[-1].strip()
         return "Outbound", name
     src = props.get("hs_analytics_source") or ""
@@ -322,6 +351,8 @@ def fetch_demos(start_ms, end_ms):
     Pull all calendar-booked (MEETINGS_PUBLIC) demos in the given epoch-ms range.
     Returns a list of row dicts ready for reporting.
     """
+    link_map = fetch_meeting_link_map()
+
     print(f"  Fetching meetings booked {fmt_ts(start_ms)} → {fmt_ts(end_ms)} ...")
     meetings = hs_search_all("meetings", [
         {"propertyName": "hs_meeting_source",  "operator": "EQ",  "value": "MEETINGS_PUBLIC"},
@@ -329,6 +360,12 @@ def fetch_demos(start_ms, end_ms):
         {"propertyName": "hs_createdate",       "operator": "LTE", "value": str(end_ms)},
     ], MEETING_PROPS)
     print(f"  {len(meetings)} meetings found")
+
+    # Pre-compute link channel per meeting
+    link_channel_by_mtg = {}
+    for m in meetings:
+        lid = str(m.get("properties", {}).get("hs_meeting_created_from_link_id") or "")
+        link_channel_by_mtg[m["id"]] = link_map.get(lid)  # None if link ID unknown
 
     if not meetings:
         return []
@@ -351,10 +388,19 @@ def fetch_demos(start_ms, end_ms):
     deal_stages = fetch_contact_deal_stages(contact_ids, stage_map)
 
     # ── Instantly campaigns (outbound contacts only) ───────────────────────
+    # Outbound = booked via outbound calendar link OR has instantly_campaign_name__all_ set
+    outbound_contact_ids = set()
+    for m in meetings:
+        cid = (mtg_to_contact.get(m["id"]) or [None])[0]
+        if not cid:
+            continue
+        lc = link_channel_by_mtg.get(m["id"])
+        if lc == "Outbound" or (contact_map.get(cid) or {}).get("instantly_campaign_name__all_"):
+            outbound_contact_ids.add(cid)
     outbound_email_map = {
         cid: contact_map[cid].get("email", "")
-        for cid in contact_ids
-        if (contact_map.get(cid) or {}).get("instantly_campaign_name__all_")
+        for cid in outbound_contact_ids
+        if contact_map.get(cid)
     }
     instantly_map = {}
     if outbound_email_map:
@@ -369,7 +415,8 @@ def fetch_demos(start_ms, end_ms):
         props = contact_map.get(cid, {}) if cid else {}
 
         outcome, ff_url     = get_outcome(mp, cid, ff_map)
-        channel, src_detail = classify_source(props, instantly_map.get(cid))
+        link_channel        = link_channel_by_mtg.get(m["id"])
+        channel, src_detail = classify_source(props, link_channel, instantly_map.get(cid))
         deal_stage, has_deal = deal_stages.get(cid, ("", False)) if cid else ("", False)
 
         name = f"{props.get('firstname') or ''} {props.get('lastname') or ''}".strip()
