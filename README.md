@@ -1,6 +1,6 @@
 # Demo Booking Reports for Slack
 
-Automated weekly and monthly demo booking summaries posted to Slack. Pulls data from HubSpot, detects meeting outcomes via Fireflies.ai, classifies lead source via Instantly, and shows real deal stages from HubSpot CRM.
+Automated weekly and monthly demo booking summaries posted to Slack. Pulls data from HubSpot, detects meeting outcomes via Fireflies.ai, classifies lead source via the HubSpot booking link used, and shows real deal stages from HubSpot CRM.
 
 ## What it does
 
@@ -20,8 +20,12 @@ Both post to the `#demo-booked` Slack channel.
 
 ## How source is classified
 
-- **Outbound** — `instantly_campaign_name__all_` field is populated in HubSpot. Campaign name is fetched from the Instantly API (latest campaign by last contact date).
-- **Inbound** — no Instantly campaign. Source label derived from `hs_analytics_source` (Organic Search, Direct, etc.).
+Source is determined by **which HubSpot booking link the prospect used**, fetched live from the scheduler API each run:
+
+- **Outbound** — booking link name contains "outbound" (e.g. Jay's Outbound Calendar). Campaign name is fetched from the Instantly API as the source detail.
+- **Inbound** — all other booking links (e.g. Jay's Website Calendar, Inbound Follow-up Calendar). Source label derived from `hs_analytics_source` (Organic Search, Direct, etc.).
+
+Falls back to the `instantly_campaign_name__all_` HubSpot property if the booking link ID is not recognised.
 
 ## Deal stages
 
@@ -48,6 +52,7 @@ Add these three secrets to the repo (`Settings → Secrets and variables → Act
 - CRM → Notes → Read (under Engagements)
 - CRM → Associations → Read
 - CRM → Deals → Read
+- Scheduling → Meeting links → Read (`scheduler.meetings.meeting-link.read`)
 
 ### 3. Run locally
 
