@@ -470,7 +470,19 @@ def row_block(r):
     return f"{line1}\n{line2}"
 
 
-def channel_section(rows, emoji, label):
+def campaign_breakdown(outbound_rows):
+    """Per-campaign summary lines for outbound rows, sorted by most bookings."""
+    buckets = defaultdict(list)
+    for r in outbound_rows:
+        buckets[r["source_detail"]].append(r)
+    lines = []
+    for name, cr in sorted(buckets.items(), key=lambda x: -len(x[1])):
+        cs = sum(1 for r in cr if r["outcome"] == "showed")
+        lines.append(f"   📣 *{name}*   {len(cr)} booked  ·  {cs} showed")
+    return lines
+
+
+def channel_section(rows, emoji, label, campaign_lines=None):
     """Render a labelled channel block — header with stats + rows."""
     if not rows:
         return []
@@ -486,6 +498,8 @@ def channel_section(rows, emoji, label):
         f"   ·   🟢 {pipeline} in pipeline"
     )
     lines = [header, ""]
+    if campaign_lines:
+        lines += campaign_lines + [""]
     lines.extend(row_block(r) for r in rows)
     return lines
 
@@ -531,7 +545,8 @@ def slack_weekly(rows, label):
     lines += channel_section(inbound_rows,  "🔵", "Inbound")
     if inbound_rows and outbound_rows:
         lines += [""]
-    lines += channel_section(outbound_rows, "🟠", "Outbound")
+    lines += channel_section(outbound_rows, "🟠", "Outbound",
+                             campaign_lines=campaign_breakdown(outbound_rows))
     return "\n".join(lines)
 
 
@@ -605,6 +620,9 @@ def slack_monthly(rows, label):
         s = channel_summary(ch)
         if s:
             lines.append(s)
+            if ch == "Outbound":
+                cr = [r for r in rows if r["channel"] == "Outbound"]
+                lines.extend(campaign_breakdown(cr))
 
     lines += ["", "─" * 38, "", "*Week by week:*"]
     for mon_dt in sorted(week_buckets):
