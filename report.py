@@ -239,7 +239,7 @@ def fetch_fireflies_transcripts(start_ms, end_ms):
         title
         date
         duration
-        participants { displayName email }
+        participants
         summary { overview action_items keywords }
       }
     }
@@ -283,9 +283,9 @@ def preload_fireflies(contact_ids, contact_email_map, start_ms, end_ms):
         email_to_cid = {v.lower(): k for k, v in contact_email_map.items() if v}
         for t in transcripts:
             external_emails = [
-                (p.get("email") or "").lower()
+                p.lower()
                 for p in (t.get("participants") or [])
-                if (p.get("email") or "").lower() and INTERNAL_DOMAIN not in (p.get("email") or "").lower()
+                if p and INTERNAL_DOMAIN not in p.lower()
             ]
             for email in external_emails:
                 cid = email_to_cid.get(email)
@@ -480,7 +480,7 @@ def fetch_demos(start_ms, end_ms):
     # ── Fireflies ─────────────────────────────────────────────────────────
     contact_email_map = {cid: (contact_map.get(cid) or {}).get("email", "") for cid in contact_ids}
     print(f"  Checking Fireflies for {len(contact_ids)} contacts ...")
-    ff_map = preload_fireflies(contact_ids, contact_email_map, start_ms, end_ms)
+    ff_map = preload_fireflies(contact_ids, contact_email_map, start_ms, max(end_ms, NOW_MS))
 
     # ── Deals (from actual deal objects, not contact property) ────────────
     print(f"  Fetching deals for {len(contact_ids)} contacts ...")
@@ -576,7 +576,7 @@ def row_block(r):
     line1 = f"{E_OUT[r['outcome']]}  *{r['name']}*  —  {r['company']}   _{r['meeting_date']}_"
     line2 = f"     {src}   ·   {stage}"
     if r["outcome"] == "showed" and r.get("ff_duration"):
-        extras = [f"{r['ff_duration']}m"]
+        extras = [f"{round(r['ff_duration'])}m"]
         if r.get("ff_action_items_count"):
             extras.append(f"{r['ff_action_items_count']} action items")
         line2 += "   ·   " + "   ·   ".join(extras)
