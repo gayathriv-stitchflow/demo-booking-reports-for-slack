@@ -15,8 +15,10 @@ Both post to the `#demo-booked` Slack channel.
 |---------|-------|
 | Cancelled | Meeting title starts with "Canceled:" |
 | Upcoming | Meeting start time is in the future |
-| Showed | Fireflies.ai link found in meeting body or contact notes |
-| No-show | Past meeting, no Fireflies link |
+| Showed | Contact email found in a Fireflies transcript (direct API); fallback: Fireflies link in meeting body or contact notes |
+| No-show | Past meeting, no Fireflies signal found |
+
+Showed contacts also get enrichment from Fireflies: call duration, action item count, and top keywords — shown inline in the Slack report.
 
 ## How source is classified
 
