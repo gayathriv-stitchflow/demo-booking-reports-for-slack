@@ -662,7 +662,7 @@ def slack_weekly(rows, label, active_campaigns=None):
         for r in needs_fu:
             detail = f"  —  {r['company']}"
             if r.get("ff_duration"):
-                detail += f"   {r['ff_duration']}m"
+                detail += f"   {round(r['ff_duration'])}m"
             if r.get("ff_keywords"):
                 detail += f"   ·   {', '.join(r['ff_keywords'][:3])}"
             lines.append(f"   • *{r['name']}*{detail}")
@@ -767,8 +767,14 @@ def slack_monthly(rows, label, active_campaigns=None):
 
     needs_fu = [r for r in rows if r["outcome"] == "showed" and not r["has_deal"]]
     if needs_fu:
-        names = ",  ".join(r["company"] if r["company"] != "—" else r["name"] for r in needs_fu)
-        lines += ["", f"⚠️ *Showed — no deal opened ({len(needs_fu)}):*   {names}"]
+        lines += ["", f"⚠️ *Showed — no deal opened ({len(needs_fu)}):*"]
+        for r in needs_fu:
+            detail = f"  —  {r['company']}"
+            if r.get("ff_duration"):
+                detail += f"   {round(r['ff_duration'])}m"
+            if r.get("ff_keywords"):
+                detail += f"   ·   {', '.join(r['ff_keywords'][:3])}"
+            lines.append(f"   • *{r['name']}*{detail}")
 
     return "\n".join(lines)
 
