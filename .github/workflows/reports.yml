@@ -47,6 +47,7 @@ jobs:
           HUBSPOT_TOKEN:     ${{ secrets.HUBSPOT_TOKEN }}
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           INSTANTLY_API_KEY: ${{ secrets.INSTANTLY_API_KEY }}
+          FIREFLIES_API_KEY: ${{ secrets.FIREFLIES_API_KEY }}
         run: |
           DRY_RUN=""
           if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
@@ -76,6 +77,7 @@ jobs:
           HUBSPOT_TOKEN:     ${{ secrets.HUBSPOT_TOKEN }}
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           INSTANTLY_API_KEY: ${{ secrets.INSTANTLY_API_KEY }}
+          FIREFLIES_API_KEY: ${{ secrets.FIREFLIES_API_KEY }}
         run: |
           DRY_RUN=""
           if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then

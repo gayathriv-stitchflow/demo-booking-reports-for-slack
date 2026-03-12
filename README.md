@@ -44,6 +44,7 @@ Add these three secrets to the repo (`Settings → Secrets and variables → Act
 | `HUBSPOT_TOKEN` | HubSpot private app token |
 | `SLACK_WEBHOOK_URL` | Slack incoming webhook URL |
 | `INSTANTLY_API_KEY` | Instantly API key |
+| `FIREFLIES_API_KEY` | Fireflies API key (optional — enriches showed rows with duration, action items, keywords) |
 
 ### 2. HubSpot private app scopes required
 

@@ -16,8 +16,11 @@ from collections import defaultdict
 HUBSPOT_TOKEN    = os.environ["HUBSPOT_TOKEN"]
 SLACK_WEBHOOK    = os.environ.get("SLACK_WEBHOOK_URL", "")
 INSTANTLY_KEY    = os.environ.get("INSTANTLY_API_KEY", "")
+FIREFLIES_KEY    = os.environ.get("FIREFLIES_API_KEY", "")
 BASE_URL         = "https://api.hubapi.com"
 INSTANTLY_BASE   = "https://api.instantly.ai/api/v2"
+FIREFLIES_GQL    = "https://api.fireflies.ai/graphql"
+INTERNAL_DOMAIN  = "@stitchflow.io"
 HS               = {"Authorization": f"Bearer {HUBSPOT_TOKEN}", "Content-Type": "application/json"}
 INST_H           = {"Authorization": f"Bearer {INSTANTLY_KEY}", "Content-Type": "application/json"}
 
@@ -220,49 +223,118 @@ def preload_instantly_campaigns(contact_email_map):
 
 # ── Fireflies detection ────────────────────────────────────────────────────
 
-def preload_fireflies(contact_ids):
+def fetch_fireflies_transcripts(start_ms, end_ms):
     """
-    For a list of contact IDs, determine which ones have a Fireflies
-    link anywhere in their associated meetings or notes.
+    Query Fireflies API for all transcripts in the reporting date range.
+    Returns a list of raw transcript dicts from the GraphQL response.
+    """
+    if not FIREFLIES_KEY:
+        return []
+    from_date = datetime.fromtimestamp(start_ms / 1000, tz=timezone.utc).strftime("%Y-%m-%d")
+    to_date   = datetime.fromtimestamp(end_ms   / 1000, tz=timezone.utc).strftime("%Y-%m-%d")
+    query = """
+    {
+      transcripts(fromDate: "%s", toDate: "%s", limit: 50) {
+        id
+        title
+        date
+        duration
+        participants { displayName email }
+        summary { overview action_items keywords }
+      }
+    }
+    """ % (from_date, to_date)
+    try:
+        r = requests.post(
+            FIREFLIES_GQL,
+            headers={"Authorization": f"Bearer {FIREFLIES_KEY}", "Content-Type": "application/json"},
+            json={"query": query},
+            timeout=30,
+        )
+        r.raise_for_status()
+        return r.json().get("data", {}).get("transcripts") or []
+    except Exception as e:
+        print(f"  Fireflies API error: {e}")
+        return []
 
-    Returns: {contact_id -> (found: bool, url: str|None)}
+
+def preload_fireflies(contact_ids, contact_email_map, start_ms, end_ms):
     """
-    ff_map = {cid: (False, None) for cid in contact_ids}
+    For a list of contact IDs, determine which ones have a Fireflies recording
+    and enrich with duration, action items, and keywords.
+
+    Strategy:
+      Phase 0 — Fireflies API (direct): match transcripts by participant email.
+      Phase 1 — HubSpot meeting bodies (fallback for unresolved contacts).
+      Phase 2 — HubSpot contact notes (fallback for still-unresolved contacts).
+
+    contact_email_map: {contact_id -> email}
+    Returns: {contact_id -> {found, url, duration, action_items_count, keywords, overview}}
+    """
+    _blank = lambda: {"found": False, "url": None, "duration": None,
+                      "action_items_count": 0, "keywords": [], "overview": None}
+    ff_map    = {cid: _blank() for cid in contact_ids}
     remaining = list(contact_ids)
 
-    # ── Phase 1: meeting bodies ──────────────────────────────────────────
-    # Get all meeting IDs for all contacts in one batch call
-    contact_to_meeting_ids = hs_batch_assoc("contacts", remaining, "meetings")
-
-    all_meeting_ids = list({mid for mids in contact_to_meeting_ids.values() for mid in mids})
-    if all_meeting_ids:
-        meetings = hs_batch_read("meetings", all_meeting_ids, ["hs_meeting_body"])
-        body_by_mid = {m["id"]: m.get("properties", {}).get("hs_meeting_body") or "" for m in meetings}
-
-        for cid in remaining[:]:
-            for mid in contact_to_meeting_ids.get(cid, []):
-                body = body_by_mid.get(mid, "")
-                if "fireflies.ai" in body:
-                    match = FIREFLIES_RE.search(body)
-                    ff_map[cid] = (True, match.group(0) if match else None)
+    # ── Phase 0: Fireflies API ───────────────────────────────────────────
+    print(f"  Querying Fireflies API ...")
+    transcripts = fetch_fireflies_transcripts(start_ms, end_ms)
+    if transcripts:
+        email_to_cid = {v.lower(): k for k, v in contact_email_map.items() if v}
+        for t in transcripts:
+            external_emails = [
+                (p.get("email") or "").lower()
+                for p in (t.get("participants") or [])
+                if (p.get("email") or "").lower() and INTERNAL_DOMAIN not in (p.get("email") or "").lower()
+            ]
+            for email in external_emails:
+                cid = email_to_cid.get(email)
+                if cid and cid in remaining:
+                    summary      = t.get("summary") or {}
+                    ai_raw       = summary.get("action_items") or ""
+                    ai_count     = len([l for l in ai_raw.splitlines() if l.strip()]) if ai_raw else 0
+                    kw_raw       = summary.get("keywords") or []
+                    keywords     = kw_raw if isinstance(kw_raw, list) else [k.strip() for k in kw_raw.split(",") if k.strip()]
+                    ff_map[cid]  = {
+                        "found":              True,
+                        "url":                None,
+                        "duration":           t.get("duration"),
+                        "action_items_count": ai_count,
+                        "keywords":           keywords[:5],
+                        "overview":           summary.get("overview"),
+                    }
                     remaining.remove(cid)
-                    break
+                    break  # one transcript per contact is enough
 
-    # ── Phase 2: contact notes (only for contacts still not found) ───────
+    # ── Phase 1: HubSpot meeting bodies (fallback) ───────────────────────
+    if remaining:
+        contact_to_meeting_ids = hs_batch_assoc("contacts", remaining, "meetings")
+        all_meeting_ids = list({mid for mids in contact_to_meeting_ids.values() for mid in mids})
+        if all_meeting_ids:
+            meetings    = hs_batch_read("meetings", all_meeting_ids, ["hs_meeting_body"])
+            body_by_mid = {m["id"]: m.get("properties", {}).get("hs_meeting_body") or "" for m in meetings}
+            for cid in remaining[:]:
+                for mid in contact_to_meeting_ids.get(cid, []):
+                    body = body_by_mid.get(mid, "")
+                    if "fireflies.ai" in body:
+                        match = FIREFLIES_RE.search(body)
+                        ff_map[cid] = {**_blank(), "found": True, "url": match.group(0) if match else None}
+                        remaining.remove(cid)
+                        break
+
+    # ── Phase 2: contact notes (fallback for still-unresolved contacts) ──
     if remaining:
         contact_to_note_ids = hs_batch_assoc("contacts", remaining, "notes")
-
         all_note_ids = list({nid for nids in contact_to_note_ids.values() for nid in nids})
         if all_note_ids:
-            notes = hs_batch_read("notes", all_note_ids, ["hs_note_body"])
+            notes       = hs_batch_read("notes", all_note_ids, ["hs_note_body"])
             body_by_nid = {n["id"]: n.get("properties", {}).get("hs_note_body") or "" for n in notes}
-
             for cid in remaining:
                 for nid in contact_to_note_ids.get(cid, []):
                     body = body_by_nid.get(nid, "")
                     if "fireflies.ai" in body:
                         match = FIREFLIES_RE.search(body)
-                        ff_map[cid] = (True, match.group(0) if match else None)
+                        ff_map[cid] = {**_blank(), "found": True, "url": match.group(0) if match else None}
                         break
 
     return ff_map
@@ -325,9 +397,9 @@ def get_outcome(meeting_props, contact_id, ff_map):
     if start_ts > NOW_MS:
         return "upcoming", None
 
-    found, url = ff_map.get(contact_id, (False, None))
-    if found:
-        return "showed", url
+    ff_data = ff_map.get(contact_id, {})
+    if ff_data.get("found"):
+        return "showed", ff_data.get("url")
 
     if 0 < start_ts < NOW_MS:
         return "noshow", None
@@ -406,8 +478,9 @@ def fetch_demos(start_ms, end_ms):
     contact_map  = {c["id"]: c.get("properties", {}) for c in contacts_raw}
 
     # ── Fireflies ─────────────────────────────────────────────────────────
+    contact_email_map = {cid: (contact_map.get(cid) or {}).get("email", "") for cid in contact_ids}
     print(f"  Checking Fireflies for {len(contact_ids)} contacts ...")
-    ff_map = preload_fireflies(contact_ids)
+    ff_map = preload_fireflies(contact_ids, contact_email_map, start_ms, end_ms)
 
     # ── Deals (from actual deal objects, not contact property) ────────────
     print(f"  Fetching deals for {len(contact_ids)} contacts ...")
@@ -448,23 +521,28 @@ def fetch_demos(start_ms, end_ms):
         link_channel        = link_channel_by_mtg.get(m["id"])
         channel, src_detail = classify_source(props, link_channel, instantly_map.get(cid))
         deal_stage, has_deal = deal_stages.get(cid, ("", False)) if cid else ("", False)
+        ff_data              = ff_map.get(cid, {}) if cid else {}
 
         name = f"{props.get('firstname') or ''} {props.get('lastname') or ''}".strip()
 
         rows.append({
-            "id":           m["id"],
-            "contact_id":   cid or "",
-            "name":         name or "Unknown",
-            "company":      props.get("company") or "—",
-            "meeting_date": fmt_ts(parse_hs_time(mp.get("hs_meeting_start_time"))),
-            "booked_ts":    parse_hs_time(mp.get("hs_createdate")),
-            "channel":      channel,
-            "source_detail": src_detail,
-            "outcome":      outcome,
-            "ff_url":       ff_url,
-            "lead_status":  props.get("hs_lead_status") or "—",
-            "deal_stage":   deal_stage,
-            "has_deal":     has_deal,
+            "id":                   m["id"],
+            "contact_id":           cid or "",
+            "name":                 name or "Unknown",
+            "company":              props.get("company") or "—",
+            "meeting_date":         fmt_ts(parse_hs_time(mp.get("hs_meeting_start_time"))),
+            "booked_ts":            parse_hs_time(mp.get("hs_createdate")),
+            "channel":              channel,
+            "source_detail":        src_detail,
+            "outcome":              outcome,
+            "ff_url":               ff_url,
+            "ff_duration":          ff_data.get("duration"),
+            "ff_action_items_count": ff_data.get("action_items_count", 0),
+            "ff_keywords":          ff_data.get("keywords", []),
+            "ff_overview":          ff_data.get("overview"),
+            "lead_status":          props.get("hs_lead_status") or "—",
+            "deal_stage":           deal_stage,
+            "has_deal":             has_deal,
         })
 
     # Deduplicate — one row per contact, keep the most recent booking
@@ -497,6 +575,11 @@ def row_block(r):
         src = src[:25] + "…"
     line1 = f"{E_OUT[r['outcome']]}  *{r['name']}*  —  {r['company']}   _{r['meeting_date']}_"
     line2 = f"     {src}   ·   {stage}"
+    if r["outcome"] == "showed" and r.get("ff_duration"):
+        extras = [f"{r['ff_duration']}m"]
+        if r.get("ff_action_items_count"):
+            extras.append(f"{r['ff_action_items_count']} action items")
+        line2 += "   ·   " + "   ·   ".join(extras)
     return f"{line1}\n{line2}"
 
 
@@ -575,11 +658,14 @@ def slack_weekly(rows, label, active_campaigns=None):
     ]
 
     if needs_fu:
-        names = "   ·   ".join(f"*{r['name']}*" for r in needs_fu)
-        lines += [
-            "",
-            f"⚠️ *Showed — no deal opened yet ({len(needs_fu)}):*   {names}",
-        ]
+        lines += ["", f"⚠️ *Showed — no deal opened yet ({len(needs_fu)}):*"]
+        for r in needs_fu:
+            detail = f"  —  {r['company']}"
+            if r.get("ff_duration"):
+                detail += f"   {r['ff_duration']}m"
+            if r.get("ff_keywords"):
+                detail += f"   ·   {', '.join(r['ff_keywords'][:3])}"
+            lines.append(f"   • *{r['name']}*{detail}")
 
     inbound_rows  = [r for r in rows if r["channel"] == "Inbound"]
     outbound_rows = [r for r in rows if r["channel"] == "Outbound"]
